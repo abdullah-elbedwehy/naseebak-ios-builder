@@ -1,0 +1,83 @@
+name: iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch of the private app repo
+        default: ios-build
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: abdullah-elbedwehy/naseebak-hayseebak
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.APP_DEPLOY_KEY }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+
+      - name: Resolve packages
+        working-directory: app
+        run: flutter pub get
+
+      - name: Decode GoogleService-Info.plist
+        env:
+          GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.GOOGLE_SERVICE_INFO_PLIST }}
+        run: |
+          if [ -n "${GOOGLE_SERVICE_INFO_PLIST}" ]; then
+            mkdir -p app/ios/Runner
+            printf '%s' "${GOOGLE_SERVICE_INFO_PLIST}" | base64 --decode > app/ios/Runner/GoogleService-Info.plist
+            echo "Decoded GoogleService-Info.plist"
+          else
+            echo "GOOGLE_SERVICE_INFO_PLIST is unset. Firebase stays off on iOS."
+          fi
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/ios/Pods
+            app/ios/.symlinks
+            ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-pods-3.47.2-${{ hashFiles('app/pubspec.lock', 'app/ios/Podfile') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-3.47.2-
+
+      - name: Build unsigned iOS app
+        working-directory: app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        working-directory: app
+        run: |
+          set -euo pipefail
+          APP="build/ios/iphoneos/Runner.app"
+          test -d "$APP"
+          STAGE="build/ios/ipa-unsigned"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP" "$STAGE/Payload/Runner.app"
+          rm -f build/ios/naseebak-unsigned.ipa
+          (cd "$STAGE" && zip -r -y -q ../naseebak-unsigned.ipa Payload)
+          unzip -t build/ios/naseebak-unsigned.ipa
+          ls -lh build/ios/naseebak-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: naseebak-unsigned-ipa
+          path: app/build/ios/naseebak-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 1
+
